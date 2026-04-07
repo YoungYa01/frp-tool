@@ -1,0 +1,79 @@
+serverAddr = "8.137.8.228"
+serverPort = 7000
+loginFailExit = true
+
+[auth]
+method = "token"
+token = "147369wfyjh@"
+additionalScopes = [
+    "HeartBeats",
+]
+
+[auth.oidc]
+insecureSkipVerify = false
+
+[transport]
+protocol = "tcp"
+tcpMux = true
+heartbeatInterval = -1
+
+[transport.tls]
+enable = true
+disableCustomTLSFirstByte = true
+
+[webServer]
+pprofEnable = false
+
+[log]
+to = "console"
+level = "info"
+maxDays = 3
+disablePrintColor = false
+
+[[proxies]]
+name = "youngya-8099"
+type = "tcp"
+enabled = true
+localIP = "127.0.0.1"
+localPort = 8099
+remotePort = 8099
+
+[proxies.transport]
+useEncryption = false
+useCompression = false
+
+[proxies.healthCheck]
+type = "http"
+
+[[proxies]]
+name = "youngya-8098"
+type = "tcp"
+enabled = true
+localIP = "127.0.0.1"
+localPort = 8098
+remotePort = 8098
+
+[proxies.transport]
+useEncryption = false
+useCompression = false
+
+[[proxies]]
+name = "youngya-8097"
+type = "tcp"
+localIP = "127.0.0.1"
+localPort = 8097
+remotePort = 8097
+
+[[proxies]]
+name = "youngya-8096"
+type = "tcp"
+localIP = "127.0.0.1"
+localPort = 8096
+remotePort = 8096
+
+[[proxies]]
+name = "youngya-8095"
+type = "tcp"
+localIP = "127.0.0.1"
+localPort = 8095
+remotePort = 8095

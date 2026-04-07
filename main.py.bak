@@ -1,0 +1,351 @@
+import sys
+import os
+import winreg
+import tomli
+import tomli_w
+from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
+                             QTabWidget, QLabel, QLineEdit, QSpinBox, QCheckBox, QPushButton,
+                             QTableWidget, QTableWidgetItem, QHeaderView, QTextEdit, QMessageBox,
+                             QGroupBox, QFormLayout, QSplitter)
+from PyQt5.QtCore import Qt, QProcess, pyqtSignal, QObject  # 注意这里多导入了 QObject
+from PyQt5.QtGui import QFont
+
+
+# --- 配置管理类 ---
+class ConfigManager:
+    def __init__(self, config_path="frpc.toml"):
+        self.config_path = config_path
+        self.default_config = {
+            "serverAddr": "0.0.0.0",
+            "serverPort": 7000,
+            "transport": {"protocol": "tcp"},
+            "auth": {"method": "token", "token": ""},
+            "proxies": []
+        }
+
+    def load_config(self):
+        if not os.path.exists(self.config_path):
+            return self.default_config.copy()
+        try:
+            with open(self.config_path, "rb") as f:
+                return tomli.load(f)
+        except Exception as e:
+            print(f"Load config error: {e}")
+            return self.default_config.copy()
+
+    def save_config(self, config):
+        try:
+            with open(self.config_path, "wb") as f:
+                tomli_w.dump(config, f)
+            return True
+        except Exception as e:
+            print(f"Save config error: {e}")
+            return False
+
+
+# --- 进程管理类 (修复：必须继承 QObject) ---
+class FrpProcessManager(QObject):  # <--- 这里修改了：继承 QObject
+    log_signal = pyqtSignal(str)
+    status_signal = pyqtSignal(bool)
+
+    def __init__(self, exe_path="frpc.exe", config_path="frpc.toml"):
+        super().__init__()  # <--- 这里修改了：必须调用父类初始化
+        self.process = QProcess()
+        self.exe_path = exe_path
+        self.config_path = config_path
+        self.is_running = False
+
+        # 连接信号
+        self.process.readyReadStandardOutput.connect(self._on_stdout)
+        self.process.readyReadStandardError.connect(self._on_stderr)
+        self.process.finished.connect(self._on_finished)
+        self.process.started.connect(self._on_started)
+
+    def start(self):
+        if self.is_running:
+            return
+        if not os.path.exists(self.exe_path):
+            self.log_signal.emit(f"[ERROR] 找不到 {self.exe_path}")
+            return
+
+        # 启动参数
+        args = ["-c", self.config_path]
+        self.process.start(self.exe_path, args)
+
+    def stop(self):
+        if self.is_running:
+            self.process.kill()
+            self.process.waitForFinished()
+
+    def _on_started(self):
+        self.is_running = True
+        self.status_signal.emit(True)
+        self.log_signal.emit("[INFO] Frpc 已启动")
+
+    def _on_finished(self, exit_code, exit_status):
+        self.is_running = False
+        self.status_signal.emit(False)
+        self.log_signal.emit(f"[INFO] Frpc 已停止 (Code: {exit_code})")
+
+    def _on_stdout(self):
+        data = self.process.readAllStandardOutput().data().decode('utf-8', errors='ignore')
+        self.log_signal.emit(data.strip())
+
+    def _on_stderr(self):
+        data = self.process.readAllStandardError().data().decode('utf-8', errors='ignore')
+        self.log_signal.emit(data.strip())
+
+
+# --- 主窗口 ---
+class FrpManagerWindow(QMainWindow):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("Frp 客户端管理器 (PyQt)")
+        self.resize(800, 600)
+
+        self.cfg_mgr = ConfigManager()
+        self.proc_mgr = FrpProcessManager()
+        self.current_config = self.cfg_mgr.load_config()
+
+        self._init_ui()
+        self._load_config_to_ui()
+        self._connect_signals()
+
+    def _init_ui(self):
+        # 中心部件
+        central_widget = QWidget()
+        self.setCentralWidget(central_widget)
+        main_layout = QVBoxLayout(central_widget)
+
+        # 顶部控制栏
+        ctrl_bar = QHBoxLayout()
+        self.btn_start = QPushButton("启动 Frpc")
+        self.btn_stop = QPushButton("停止 Frpc")
+        self.btn_stop.setEnabled(False)
+        self.lbl_status = QLabel("状态: 未运行")
+        self.lbl_status.setStyleSheet("color: red; font-weight: bold;")
+
+        self.chk_autostart = QCheckBox("开机自启动")
+
+        ctrl_bar.addWidget(self.btn_start)
+        ctrl_bar.addWidget(self.btn_stop)
+        ctrl_bar.addWidget(self.lbl_status)
+        ctrl_bar.addStretch()
+        ctrl_bar.addWidget(self.chk_autostart)
+        main_layout.addLayout(ctrl_bar)
+
+        # 选项卡
+        self.tabs = QTabWidget()
+        main_layout.addWidget(self.tabs)
+
+        # --- Tab 1: 配置编辑 ---
+        tab_config = QWidget()
+        tab_layout = QVBoxLayout(tab_config)
+
+        # 通用配置区
+        group_general = QGroupBox("通用配置 (Common)")
+        form_layout = QFormLayout()
+
+        self.le_server_addr = QLineEdit()
+        self.sb_server_port = QSpinBox()
+        self.sb_server_port.setRange(1, 65535)
+        self.le_token = QLineEdit()
+
+        form_layout.addRow("服务端地址 (serverAddr):", self.le_server_addr)
+        form_layout.addRow("服务端端口 (serverPort):", self.sb_server_port)
+        form_layout.addRow("认证 Token (token):", self.le_token)
+        group_general.setLayout(form_layout)
+        tab_layout.addWidget(group_general)
+
+        # 代理列表区
+        group_proxy = QGroupBox("代理列表 (Proxies)")
+        proxy_layout = QVBoxLayout()
+
+        # 表格
+        self.table_proxies = QTableWidget()
+        self.table_proxies.setColumnCount(5)
+        self.table_proxies.setHorizontalHeaderLabels(
+            ["名称 (name)", "类型 (type)", "本地IP (localIP)", "本地端口 (localPort)", "远程端口 (remotePort)"])
+        self.table_proxies.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+
+        # 表格操作栏
+        proxy_bar = QHBoxLayout()
+        self.btn_add_proxy = QPushButton("添加代理")
+        self.btn_del_proxy = QPushButton("删除选中")
+        proxy_bar.addWidget(self.btn_add_proxy)
+        proxy_bar.addWidget(self.btn_del_proxy)
+        proxy_bar.addStretch()
+
+        proxy_layout.addLayout(proxy_bar)
+        proxy_layout.addWidget(self.table_proxies)
+        group_proxy.setLayout(proxy_layout)
+        tab_layout.addWidget(group_proxy)
+
+        # 保存按钮
+        self.btn_save_cfg = QPushButton("保存配置到 frpc.toml")
+        tab_layout.addWidget(self.btn_save_cfg)
+
+        self.tabs.addTab(tab_config, "配置编辑")
+
+        # --- Tab 2: 日志 ---
+        tab_log = QWidget()
+        log_layout = QVBoxLayout(tab_log)
+        self.txt_log = QTextEdit()
+        self.txt_log.setReadOnly(True)
+        self.txt_log.setFont(QFont("Consolas", 9))
+        log_layout.addWidget(self.txt_log)
+        self.tabs.addTab(tab_log, "运行日志")
+
+    def _connect_signals(self):
+        # 按钮
+        self.btn_save_cfg.clicked.connect(self._save_config)
+        self.btn_start.clicked.connect(self.proc_mgr.start)
+        self.btn_stop.clicked.connect(self.proc_mgr.stop)
+        self.btn_add_proxy.clicked.connect(self._add_proxy_row)
+        self.btn_del_proxy.clicked.connect(self._del_proxy_row)
+
+        # 进程信号
+        self.proc_mgr.log_signal.connect(self._append_log)
+        self.proc_mgr.status_signal.connect(self._update_status)
+
+        # 开机自启
+        self.chk_autostart.stateChanged.connect(self._toggle_autostart)
+        # 初始化检查状态
+        self._check_autostart()
+
+    def _load_config_to_ui(self):
+        cfg = self.current_config
+        # 加载通用
+        self.le_server_addr.setText(cfg.get("serverAddr", ""))
+        self.sb_server_port.setValue(cfg.get("serverPort", 7000))
+
+        auth = cfg.get("auth", {})
+        self.le_token.setText(auth.get("token", ""))
+
+        # 加载代理
+        proxies = cfg.get("proxies", [])
+        self.table_proxies.setRowCount(0)
+        for p in proxies:
+            self._append_proxy_to_table(p)
+
+    def _save_config(self):
+        # 从UI读取
+        cfg = {}
+        cfg["serverAddr"] = self.le_server_addr.text()
+        cfg["serverPort"] = self.sb_server_port.value()
+        cfg["transport"] = {"protocol": "tcp"}
+        cfg["auth"] = {"method": "token", "token": self.le_token.text()}
+
+        # 读取表格
+        proxies = []
+        for i in range(self.table_proxies.rowCount()):
+            p = {
+                "name": self.table_proxies.item(i, 0).text(),
+                "type": self.table_proxies.item(i, 1).text(),
+                "localIP": self.table_proxies.item(i, 2).text(),
+                "localPort": int(self.table_proxies.item(i, 3).text()),
+                "remotePort": int(self.table_proxies.item(i, 4).text()),
+            }
+            proxies.append(p)
+        cfg["proxies"] = proxies
+
+        self.current_config = cfg
+        if self.cfg_mgr.save_config(cfg):
+            QMessageBox.information(self, "成功", "配置已保存！")
+        else:
+            QMessageBox.warning(self, "错误", "配置保存失败！")
+
+    def _add_proxy_row(self):
+        # 默认值
+        default_proxy = {
+            "name": f"proxy_{self.table_proxies.rowCount() + 1}",
+            "type": "tcp",
+            "localIP": "127.0.0.1",
+            "localPort": 8080,
+            "remotePort": 8080
+        }
+        self._append_proxy_to_table(default_proxy)
+
+    def _append_proxy_to_table(self, p):
+        row = self.table_proxies.rowCount()
+        self.table_proxies.insertRow(row)
+        self.table_proxies.setItem(row, 0, QTableWidgetItem(p.get("name", "")))
+        self.table_proxies.setItem(row, 1, QTableWidgetItem(p.get("type", "tcp")))
+        self.table_proxies.setItem(row, 2, QTableWidgetItem(p.get("localIP", "127.0.0.1")))
+        self.table_proxies.setItem(row, 3, QTableWidgetItem(str(p.get("localPort", ""))))
+        self.table_proxies.setItem(row, 4, QTableWidgetItem(str(p.get("remotePort", ""))))
+
+    def _del_proxy_row(self):
+        curr_row = self.table_proxies.currentRow()
+        if curr_row >= 0:
+            self.table_proxies.removeRow(curr_row)
+
+    def _update_status(self, is_running):
+        if is_running:
+            self.lbl_status.setText("状态: 运行中")
+            self.lbl_status.setStyleSheet("color: green; font-weight: bold;")
+            self.btn_start.setEnabled(False)
+            self.btn_stop.setEnabled(True)
+        else:
+            self.lbl_status.setText("状态: 未运行")
+            self.lbl_status.setStyleSheet("color: red; font-weight: bold;")
+            self.btn_start.setEnabled(True)
+            self.btn_stop.setEnabled(False)
+
+    def _append_log(self, text):
+        if text:
+            self.txt_log.append(text)
+
+    # --- 开机自启相关 (Windows) ---
+    def _check_autostart(self):
+        key_path = r"Software\Microsoft\Windows\CurrentVersion\Run"
+        try:
+            key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, key_path, 0, winreg.KEY_READ)
+            try:
+                winreg.QueryValueEx(key, "FrpManager")
+                self.chk_autostart.blockSignals(True)
+                self.chk_autostart.setChecked(True)
+                self.chk_autostart.blockSignals(False)
+            except FileNotFoundError:
+                pass
+            winreg.CloseKey(key)
+        except Exception as e:
+            print(e)
+
+    def _toggle_autostart(self, state):
+        key_path = r"Software\Microsoft\Windows\CurrentVersion\Run"
+        app_path = os.path.abspath(sys.argv[0])
+
+        # 简单处理：如果是.py脚本，这里假设你会打包成exe，或者用 pythonw.exe 运行
+        # 这里为了演示，直接使用当前执行路径
+        exe_path = sys.executable  # python.exe
+        script_path = os.path.abspath(__file__)
+
+        # 构造命令: pythonw.exe script.py (无后台黑框)
+        if app_path.endswith('.exe'):
+            cmd = f'"{app_path}"'
+        else:
+            # 找 pythonw.exe
+            pythonw_path = os.path.join(os.path.dirname(exe_path), 'pythonw.exe')
+            if not os.path.exists(pythonw_path): pythonw_path = exe_path
+            cmd = f'"{pythonw_path}" "{script_path}"'
+
+        try:
+            key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, key_path, 0, winreg.KEY_SET_VALUE)
+            if state == Qt.Checked:
+                winreg.SetValueEx(key, "FrpManager", 0, winreg.REG_SZ, cmd)
+            else:
+                try:
+                    winreg.DeleteValue(key, "FrpManager")
+                except FileNotFoundError:
+                    pass
+            winreg.CloseKey(key)
+        except Exception as e:
+            QMessageBox.warning(self, "错误", f"无法操作注册表: {e}")
+
+
+if __name__ == "__main__":
+    app = QApplication(sys.argv)
+    window = FrpManagerWindow()
+    window.show()
+    sys.exit(app.exec_())
